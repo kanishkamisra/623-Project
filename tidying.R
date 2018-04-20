@@ -3,39 +3,53 @@ library(jsonlite)
 library(tidyjson)
 library(widyr)
 library(tidytext)
+library(ggridges)
 
 news_articles <- fromJSON("data/1996_dicts_9_sources.json", simplifyDataFrame = T)
 
 tidy_articles <- news_articles %>% 
   as.tibble()
 
+tidy_articles
+
 tidy_articles %>%
   select(text, authors) %>%
   unnest(authors) %>%
   count(authors, sort = T)
 
-source_distances <- tidy_articles %>%
-  filter(!(source %in% c("wsj", "washingtonpost", "nypost", "bostonglobe"))) %>%
-  select(text, source) %>%
-  unnest_tokens(word, text) %>%
-  count(source, word) %>%
-  pairwise_dist(source, word, n) %>%
-  multi_scale(item1, item2, distance)
+tidy_articles %>%
+  select(text, authors, source) %>%
+  unnest(authors) %>%
+  count(source, authors) %>%
+  ggplot(aes(n, source)) +
+  geom_density_ridges() + 
+  theme_ridges()
 
-source_distances %>%
-  ggplot(aes(V1, V2, color = item)) +
-  geom_point() +
-  scale_x_continuous(limits = c(-15000, 15000)) +
-  scale_y_continuous(limits = c(-15000, 15000)) 
+tidy_articles %>%
+  count(text, source, publish_date) %>%
+  arrange(-n)
 
+test <- tidy_articles %>%
+  group_by(text, source, publish_date) %>%
+  nest(url)
+test %>%
+  filter(source == "latimes", str_detect(text, "President Trump signed an executive order Monday")) %>%
+  unnest() %>%
+  pull(url)
+
+duplicate_authors <- tidy_articles %>%
+  unnest(authors) %>%
+  group_by(text) %>%
+  mutate(auth = n_distinct(authors))
+duplicate_authors %>%
+  filter(auth < 2)
 
 
 tidy_articles %>%
-  filter(!(source %in% c("wsj", "washingtonpost", "nypost", "bostonglobe"))) %>%
-  mutate(news_id = row_number()) %>%
-  select(news_id, text) %>%
-  unnest_tokens(word, text) %>%
-  count(news_id, word) %>%
-  bind_tf_idf(word, news_id, n) %>%
-  pairwise_dist(news_id, word, tf_idf, sparse = T)
+  distinct(text, source, .keep_all = T) %>%
+  mutate(length = map_int(authors, length)) %>%
+  filter(length < 2)
   
+
+
+
