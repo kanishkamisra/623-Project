@@ -1,0 +1,99 @@
+---
+title: 'Time Series Stylometry on the #TravelBan News Writers'
+author: "Kanishka Misra"
+date: "April 20, 2018"
+output: 
+  md_document: default
+  pdf_document: default
+---
+
+## Setup
+
+loading libraries
+
+```{r warning = F, message = F}
+library(tidyverse)
+library(jsonlite)
+library(tidyjson)
+library(widyr)
+library(tidytext)
+library(ggridges)
+library(lubridate)
+
+options(scipen = 99)
+```
+
+
+## Loading data
+
+```{r}
+news_articles <- fromJSON("data/1996_dicts_9_sources.json", simplifyDataFrame = T) %>%
+  as.tibble()
+
+news_articles
+```
+
+## Tidying and Nesting
+
+1. Count authors, only keep single author news articles.
+2. Remove duplicates, and keep only text based duplicates if source is differenct.
+3. Remove columns that are not relevant to the scope of this project.
+4. Nest based on author, store article count.
+5. Select top 10 (or more if similar number of articles exist) authors based on article count.
+
+```{r}
+nested_articles <- news_articles %>%
+  distinct(text, source, .keep_all = T) %>%
+  mutate(length = map_int(authors, length)) %>%
+  filter(length < 2) %>%
+  unnest(authors) %>%
+  select(text, author = authors, publish_date, source) %>%
+  group_by(author) %>%
+  nest() %>%
+  mutate(article_count = map_int(data, nrow)) %>%
+  top_n(10, article_count)
+  
+nested_articles
+```
+
+We now have a tibble of the 12 authors with the most number of articles. We can then write a generic function that maps over each author and then calculates the distances of each authors news articles from their first article during the travel ban proposal.
+
+```{r}
+temporal_delta <- function(df) {
+  df %>%
+    mutate(
+      text = str_replace_all(tolower(text), paste0(source, "|story highlights"), "")
+    ) %>%
+    select(-source) %>%
+    group_by(publish_date) %>%
+    unnest_tokens(word, text) %>%
+    count(word) %>%
+    ungroup() %>%
+    mutate(
+      publish_date = lubridate::ymd(publish_date)
+    ) %>%
+    pairwise_delta(publish_date, word, n, upper = F) %>%
+    filter(item1 == min(item1)) %>%
+    transmute(
+      publish_date = item2,
+      delta
+    )
+}
+
+temporal_delta(nested_articles[1, ]$data[[1]])
+```
+
+If we map this to all writer's data, we get the following plot:
+
+```{r}
+author_deltas <- nested_articles %>%
+  mutate(ts_delta = map(data, temporal_delta)) %>%
+  unnest(ts_delta)
+
+author_deltas %>%
+  ggplot(aes(publish_date, delta)) + 
+  geom_line() + 
+  facet_wrap(~author)
+```
+
+Help me.
