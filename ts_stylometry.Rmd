@@ -21,6 +21,8 @@ library(ggridges)
 library(lubridate)
 
 options(scipen = 99)
+
+source("utils.R")
 ```
 
 
@@ -72,7 +74,8 @@ temporal_delta <- function(df) {
     mutate(
       publish_date = lubridate::ymd(publish_date)
     ) %>%
-    pairwise_delta(publish_date, word, n, upper = F) %>%
+    bind_tf_idf(publish_date, word, n) %>%
+    pairwise_delta(publish_date, word, tf_idf, upper = F) %>%
     filter(item1 == min(item1)) %>%
     transmute(
       publish_date = item2,
@@ -96,4 +99,84 @@ author_deltas %>%
   facet_wrap(~author)
 ```
 
-Help me.
+## Alternate metric.
+
+Instead of using normalized frequencies, we can consider using the term frequency - inverse document frequency of each word in the document and then select the words with the highest tf-idf with some threshold. The threshold can be derived from...
+
+```{r}
+nested_articles[1, ]$data[[1]] %>%
+  mutate(
+    text = str_replace_all(tolower(text), paste0(source, "|story highlights"), "")
+  ) %>%
+  select(-source) %>%
+  group_by(publish_date) %>%
+  unnest_tokens(word, text) %>%
+  count(word) %>%
+  ungroup() %>%
+  mutate(
+    publish_date = lubridate::ymd(publish_date)
+  ) %>%
+  bind_tf_idf(publish_date, word, n) %>%
+  group_by(publish_date) %>%
+  arrange(publish_date, tf_idf) %>%
+  filter(tf_idf >= quantile(tf_idf, 0.9)) %>%
+  ungroup() %>%
+  arrange(publish_date) %>%
+  pairwise_delta(publish_date, word, tf_idf, upper = F) %>%
+  filter(item1 == min(item1)) %>%
+  transmute(
+    publish_date = item2,
+    delta
+  ) %>%
+  ggplot(aes(publish_date, delta)) + 
+  geom_line()
+```
+
+## Same author different sources.
+
+```{r}
+source_deltas <- news_articles %>%
+  distinct(text, source, .keep_all = T) %>%
+  mutate(length = map_int(authors, length)) %>%
+  filter(length < 2) %>%
+  unnest(authors) %>%
+  select(text, author = authors, publish_date, source) %>%
+  group_by(author) %>%
+  nest() %>%
+  mutate(
+    sources = map_int(data, function(x) {
+      x %>%
+        distinct(source) %>%
+        pull(source) %>%
+        length()
+    })
+  ) %>%
+  filter(sources > 1) %>%
+  mutate(
+    data = map(data, add_rowid),
+    deltas = map(data, function(x) {
+      x %>%
+        mutate(article_id = paste(source, article_id, sep = "_")) %>%
+        group_by(article_id) %>%
+        unnest_tokens(word, text) %>%
+        count(article_id, word) %>%
+        group_by(article_id) %>%
+        mutate(p_word = n/sum(n)) %>%
+        ungroup() %>%
+        pairwise_delta(article_id, word, p_word)
+    })
+  )
+
+source_deltas %>%
+  select(author, deltas) %>%
+  unnest() %>%
+  filter(author == "mark sherman") %>%
+  select(-author) %>%
+  multi_scale(item1, item2, delta) %>%
+  # separate(item, into = c("source", "id"), sep = "_") %>%
+  ggplot(aes(V1, V2, color = item)) + 
+  geom_point() +
+  geom_text(aes(label = item)) +
+  scale_y_continuous(limits = c(-0.75, 0.75))
+```
+
