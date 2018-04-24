@@ -3,8 +3,8 @@ title: 'Time Series Stylometry on the #TravelBan News Writers'
 author: "Kanishka Misra"
 date: "April 20, 2018"
 output: 
-  md_document: default
   pdf_document: default
+  md_document: default
 ---
 
 ## Setup
@@ -19,6 +19,9 @@ library(widyr)
 library(tidytext)
 library(ggridges)
 library(lubridate)
+library(rvest)
+library(scales)
+library(ggrepel)
 
 options(scipen = 99)
 
@@ -29,7 +32,7 @@ source("utils.R")
 ## Loading data
 
 ```{r}
-news_articles <- fromJSON("data/1996_dicts_9_sources.json", simplifyDataFrame = T) %>%
+news_articles <- fromJSON("data/datafor623project.json", simplifyDataFrame = T) %>%
   as.tibble()
 
 news_articles
@@ -41,7 +44,7 @@ news_articles
 2. Remove duplicates, and keep only text based duplicates if source is differenct.
 3. Remove columns that are not relevant to the scope of this project.
 4. Nest based on author, store article count.
-5. Select top 10 (or more if similar number of articles exist) authors based on article count.
+5. Select top 10 (or more if similar number of articles exist) authors based on number of articles.
 
 ```{r}
 nested_articles <- news_articles %>%
@@ -49,6 +52,7 @@ nested_articles <- news_articles %>%
   mutate(length = map_int(authors, length)) %>%
   filter(length < 2) %>%
   unnest(authors) %>%
+  mutate(authors = str_replace_all(authors, "\\.", " ")) %>%
   select(text, author = authors, publish_date, source) %>%
   group_by(author) %>%
   nest() %>%
@@ -60,7 +64,90 @@ nested_articles
 
 We now have a tibble of the 12 authors with the most number of articles. We can then write a generic function that maps over each author and then calculates the distances of each authors news articles from their first article during the travel ban proposal.
 
+Take the top 10% of the most frequent words across documents. Why 10%? I am not very sure.
+
 ```{r}
+test <- nested_articles[1, ]$data[[1]] %>%
+  mutate(
+    text = str_replace_all(tolower(text), paste0(source, "|story highlights|washington"), "")
+  ) %>%
+  select(-source) %>%
+  group_by(publish_date) %>%
+  unnest_tokens(word, text) %>%
+  count(word) %>%
+  group_by(publish_date) %>%
+  mutate(rel_freq = n/sum(n)) %>%
+  ungroup() %>%
+  group_by(word) %>%
+  mutate(count = sum(n)) %>%
+  ungroup() %>%
+  filter(count >= quantile(count, 0.9)) %>%
+  select(publish_date, word, rel_freq)
+
+test_m <- test %>%
+  spread(word, rel_freq, fill = 0) %>%
+  as.data.frame() %>%
+  remove_rownames() %>%
+  column_to_rownames("publish_date") %>%
+  as.matrix()
+
+scale_normed <- scale(test_m) / sqrt(rowSums(scale(test_m)^2))
+normed_scaled <- scale(test_m / sqrt(rowSums(test_m^2)))
+
+normed_scaled
+
+dist(scale_normed, method = "manhattan", upper = T)/length(scale_normed[1,])
+dist(normed_scaled, method = "manhattan", upper = T) %>%
+  broom::tidy() %>%
+  mutate(distance = distance/length(normed_scaled[1,])) %>%
+  mutate(item1 = ymd(item1), item2 = ymd(item2)) %>%
+  filter(item1 == min(item1)) %>%
+  ggplot(aes(item2, distance)) +
+  geom_line()
+  
+```
+
+
+```{r}
+pairwise_normdelta <- function(tbl, item, feature, value,
+                           method = "burrows", ...) {
+  pairwise_normdelta_(tbl,
+                  col_name(substitute(item)),
+                  col_name(substitute(feature)),
+                  col_name(substitute(value)),
+                  method = method, ...)
+}
+
+pairwise_normdelta_ <- function(tbl, item, feature, value, method = "burrows", ...) {
+  delta_func <- function(m) {
+    
+    m <- m/sqrt(rowSums(m^2))
+    
+    m_scaled <- scale(m)
+
+    if(method == "burrows") {
+      return(as.matrix(stats::dist(m_scaled, method = "manhattan")/length(m[1,])))
+    }
+    else if(method == "argamon") {
+      return(as.matrix(stats::dist(m_scaled, method = "euclidean")/length(m[1,])))
+    }
+    else if (method == "cosine") {
+      normed <- m_scaled / sqrt(rowSums(m_scaled ^ 2))
+      return(1 - normed %*% t(normed))
+    }
+    else {
+      stop("Wrong method! Only method = burrows or method = argamon have been implmented!")
+    }
+  }
+
+  d_func <- squarely_(delta_func, ...)
+
+  tbl %>%
+    d_func(item, feature, value) %>%
+    rename(delta = value)
+}
+
+
 temporal_delta <- function(df) {
   df %>%
     mutate(
@@ -70,12 +157,14 @@ temporal_delta <- function(df) {
     group_by(publish_date) %>%
     unnest_tokens(word, text) %>%
     count(word) %>%
+    group_by(publish_date) %>%
+    mutate(rel_freq = n/sum(n)) %>%
     ungroup() %>%
-    mutate(
-      publish_date = lubridate::ymd(publish_date)
-    ) %>%
-    bind_tf_idf(publish_date, word, n) %>%
-    pairwise_delta(publish_date, word, tf_idf, upper = F) %>%
+    group_by(word) %>%
+    mutate(count = sum(n)) %>%
+    ungroup() %>%
+    filter(count >= quantile(count, 0.9)) %>%
+    pairwise_normdelta(publish_date, word, rel_freq, upper = F) %>%
     filter(item1 == min(item1)) %>%
     transmute(
       publish_date = item2,
@@ -83,7 +172,37 @@ temporal_delta <- function(df) {
     )
 }
 
-temporal_delta(nested_articles[1, ]$data[[1]])
+temporal_delta(nested_articles[1, ]$data[[1]]) %>%
+  mutate(
+    publish_date = lubridate::ymd(publish_date)
+  ) %>%
+  ggplot(aes(publish_date, delta, group = 1)) + 
+  geom_line()
+
+
+test_pw <- nested_articles[1, ]$data[[1]] %>%
+  mutate(
+    text = str_replace_all(tolower(text), paste0(source, "|story highlights"), "")
+  ) %>%
+  select(-source) %>%
+  group_by(publish_date) %>%
+  unnest_tokens(word, text) %>%
+  count(word) %>%
+  group_by(publish_date) %>%
+  mutate(rel_freq = n/sum(n)) %>%
+  ungroup() %>%
+  group_by(word) %>%
+  mutate(count = sum(n)) %>%
+  ungroup() %>%
+  filter(count >= quantile(count, 0.9)) %>%
+  pairwise_normdelta(publish_date, word, rel_freq) %>%
+  filter(item1 == min(item1)) %>%
+  mutate(pair = str_c(item1, item2, sep = "_"))
+  
+test_pw
+test_pwm <- pairwise.t.test(test_pw$pair, test_pw$delta)
+
+as.data.frame(test_pwm)
 ```
 
 If we map this to all writer's data, we get the following plot:
@@ -94,43 +213,79 @@ author_deltas <- nested_articles %>%
   unnest(ts_delta)
 
 author_deltas %>%
+  mutate(
+    publish_date = lubridate::ymd(publish_date)
+  ) %>%
   ggplot(aes(publish_date, delta)) + 
   geom_line() + 
   facet_wrap(~author)
 ```
 
-## Alternate metric.
-
-Instead of using normalized frequencies, we can consider using the term frequency - inverse document frequency of each word in the document and then select the words with the highest tf-idf with some threshold. The threshold can be derived from...
+## Highlighting timeline of the travel ban
 
 ```{r}
-nested_articles[1, ]$data[[1]] %>%
+fox_url <- "http://www.foxnews.com/politics/2018/01/20/trump-travel-ban-timeline-legal-journey.html"
+
+tb_timeline <- fox_url %>%
+  read_html() %>%
+  html_nodes("#wrapper > div > div.page-content > div > main > article > div > div > div.article-body > h3") %>%
+  html_text() %>%
+  as.tibble() %>%
+  mutate(value = gsub("\u00A0", " ", value)) %>%
+  separate(value, into = c("date", "announcement"), sep = " – ") %>%
   mutate(
-    text = str_replace_all(tolower(text), paste0(source, "|story highlights"), "")
+    date = case_when(
+      date == "Jan. 19" ~ paste(date, "2018", sep = " "),
+      TRUE ~ paste(date, "2017", " ")
+    ), 
+    date = mdy(date)
   ) %>%
-  select(-source) %>%
-  group_by(publish_date) %>%
-  unnest_tokens(word, text) %>%
-  count(word) %>%
-  ungroup() %>%
+  arrange(date)
+
+tb_timeline2 <- tibble(
+  date1 = tb_timeline$date[1:28],
+  date2 = tb_timeline$date[2:29]
+) %>%
+  filter(date1 < ymd("2017-10-15")) %>%
+  inner_join(tb_timeline, by = c(date1 = "date")) %>%
+  mutate(announcement = fct_relevel(announcement))
+
+##ez clap
+```
+
+## Plot
+
+```{r}
+test1 <- temporal_delta(nested_articles[1, ]$data[[1]]) %>%
   mutate(
     publish_date = lubridate::ymd(publish_date)
-  ) %>%
-  bind_tf_idf(publish_date, word, n) %>%
-  group_by(publish_date) %>%
-  arrange(publish_date, tf_idf) %>%
-  filter(tf_idf >= quantile(tf_idf, 0.9)) %>%
-  ungroup() %>%
-  arrange(publish_date) %>%
-  pairwise_delta(publish_date, word, tf_idf, upper = F) %>%
-  filter(item1 == min(item1)) %>%
-  transmute(
-    publish_date = item2,
-    delta
-  ) %>%
-  ggplot(aes(publish_date, delta)) + 
-  geom_line()
+  )
+
+ggplot(data = test1, aes(publish_date, delta)) + 
+  geom_line()+ 
+  geom_rect(data = tb_timeline2, inherit.aes = F, aes(xmin = date1, xmax = date2, ymin = min(test1$delta), ymax = max(test1$delta), group = announcement, fill = announcement), color = "transparent", alpha = 0.3) + 
+  theme_minimal() + 
+  theme(legend.position = "bottom")
+
+ggsave("test.png", width = 15)
+
+author_deltas <- author_deltas %>%
+  mutate(
+    publish_date = lubridate::ymd(publish_date)
+  )
+  
+ggplot(data = author_deltas, aes(publish_date, delta)) + 
+  geom_line() +
+  geom_rect(data = tb_timeline2, inherit.aes = F, aes(xmin = date1, xmax = date2, ymin = min(author_deltas$delta), ymax = max(author_deltas$delta), group = announcement, fill = announcement), color = "transparent", alpha = 0.5) +
+  theme_minimal() + 
+  scale_fill_discrete(breaks = tb_timeline2$announcement) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~author, ncol = 2) 
+
+ggsave("timeline.png", height = 25, width = 10)
+
 ```
+
 
 ## Same author different sources.
 
@@ -140,6 +295,7 @@ source_deltas <- news_articles %>%
   mutate(length = map_int(authors, length)) %>%
   filter(length < 2) %>%
   unnest(authors) %>%
+  mutate(authors = str_replace_all(authors, "\\.", " ")) %>%
   select(text, author = authors, publish_date, source) %>%
   group_by(author) %>%
   nest() %>%
@@ -157,26 +313,79 @@ source_deltas <- news_articles %>%
     deltas = map(data, function(x) {
       x %>%
         mutate(article_id = paste(source, article_id, sep = "_")) %>%
-        group_by(article_id) %>%
-        unnest_tokens(word, text) %>%
-        count(article_id, word) %>%
-        group_by(article_id) %>%
-        mutate(p_word = n/sum(n)) %>%
-        ungroup() %>%
-        pairwise_delta(article_id, word, p_word)
+        group_by(article_id) %>% 
+        unnest_tokens(word, text) %>% 
+        count(word) %>% 
+        group_by(article_id) %>% 
+        mutate(rel_freq = n/sum(n)) %>% 
+        ungroup() %>% 
+        group_by(word) %>% 
+        mutate(count = sum(n)) %>% 
+        ungroup() %>% 
+        filter(count >= quantile(count, 0.9)) %>%
+        pairwise_normdelta(article_id, word, rel_freq)
     })
   )
 
-source_deltas %>%
-  select(author, deltas) %>%
+author_dates <- source_deltas %>%
+  unnest(data) %>%
+  unite(article_id, source, article_id)
+
+tb_timeline3 <- tb_timeline2 %>%
+  mutate(
+    dates_between = map2(date1, date2, function(x, y) {
+      as.character(seq(to = ymd(x), from = ymd(y), length = abs(x - y)))
+    })
+  ) %>%
   unnest() %>%
-  filter(author == "mark sherman") %>%
-  select(-author) %>%
-  multi_scale(item1, item2, delta) %>%
-  # separate(item, into = c("source", "id"), sep = "_") %>%
-  ggplot(aes(V1, V2, color = item)) + 
+  mutate(
+    dates_between = ymd(dates_between)
+  )
+
+diff_sources <- source_deltas %>%
+  select(author, deltas) %>%
+  mutate(multi_scaled = map(deltas, ~multi_scale(., item1, item2, delta))) %>%
+  unnest(multi_scaled) %>%
+  rename(article_id = item) %>%
+  inner_join(author_dates %>% select(-text, -sources)) %>%
+  mutate(publish_date = ymd(publish_date)) %>%
+  inner_join(tb_timeline3, by = c(publish_date = "dates_between")) %>%
+  # filter(author == "adam liptak") %>%
+  # select(-author) %>%
+  # multi_scale(item1, item2, delta) %>%
+  separate(article_id, into = c("source", "id"), sep = "_") %>%
+  mutate(source_label = toupper(str_sub(source, 1, 3))) %>%
+  ggplot(aes(V1, V2, color = announcement)) + 
   geom_point() +
-  geom_text(aes(label = item)) +
-  scale_y_continuous(limits = c(-0.75, 0.75))
+  geom_text_repel(aes(label = source_label)) +
+  facet_wrap(~author, ncol = 1) +
+  theme(legend.position = "bottom") + 
+  guides(colour = guide_legend(ncol = 2))
+
+ggsave("diff_sources.png", diff_sources, height = 35)
+```
+
+
+
+## Alternate visualization
+
+```{r}
+zap_test <- source_deltas %>%
+  select(author, deltas) %>%
+  mutate(multi_scaled = map(deltas, ~multi_scale(., item1, item2, delta))) %>%
+  unnest(multi_scaled) %>%
+  rename(article_id = item) %>%
+  inner_join(author_dates %>% select(-text, -sources)) %>%
+  mutate(publish_date = ymd(publish_date)) %>%
+  inner_join(tb_timeline3, by = c(publish_date = "dates_between")) %>%
+  filter(author == "matt zapotosky") %>%
+  separate(article_id, into = c("source", "id"), sep = "_") %>%
+  mutate(source_label = toupper(str_sub(source, 1, 3)))
+
+ggplot(zap_test, aes(V1, V2)) + 
+  geom_point(size = 3, alpha = 0.4) + 
+  geom_point(data = zap_test %>% filter(source_label == "CHI"), color = "red", size = 3) +
+  theme_bw()
+  
 ```
 

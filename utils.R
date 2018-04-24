@@ -41,3 +41,41 @@ multi_scale_ <- function(tbl, item1, item2, value, k = 2) {
 add_rowid <- function(x) {
   x %>% mutate(article_id = row_number())
 }
+
+pairwise_normdelta <- function(tbl, item, feature, value,
+                               method = "burrows", ...) {
+  pairwise_normdelta_(tbl,
+                      col_name(substitute(item)),
+                      col_name(substitute(feature)),
+                      col_name(substitute(value)),
+                      method = method, ...)
+}
+
+pairwise_normdelta_ <- function(tbl, item, feature, value, method = "burrows", ...) {
+  delta_func <- function(m) {
+    
+    m <- m/sqrt(rowSums(m^2))
+    
+    m_scaled <- scale(m)
+    
+    if(method == "burrows") {
+      return(as.matrix(stats::dist(m_scaled, method = "manhattan")/length(m[1,])))
+    }
+    else if(method == "argamon") {
+      return(as.matrix(stats::dist(m_scaled, method = "euclidean")/length(m[1,])))
+    }
+    else if (method == "cosine") {
+      normed <- m_scaled / sqrt(rowSums(m_scaled ^ 2))
+      return(1 - normed %*% t(normed))
+    }
+    else {
+      stop("Wrong method! Only method = burrows or method = argamon have been implmented!")
+    }
+  }
+  
+  d_func <- squarely_(delta_func, ...)
+  
+  tbl %>%
+    d_func(item, feature, value) %>%
+    rename(delta = value)
+}

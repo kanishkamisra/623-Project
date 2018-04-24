@@ -13,6 +13,8 @@ loading libraries
 
     options(scipen = 99)
 
+    source("utils.R")
+
 Loading data
 ------------
 
@@ -96,7 +98,8 @@ article during the travel ban proposal.
         mutate(
           publish_date = lubridate::ymd(publish_date)
         ) %>%
-        pairwise_delta(publish_date, word, n, upper = F) %>%
+        bind_tf_idf(publish_date, word, n) %>%
+        pairwise_delta(publish_date, word, tf_idf, upper = F) %>%
         filter(item1 == min(item1)) %>%
         transmute(
           publish_date = item2,
@@ -109,16 +112,16 @@ article during the travel ban proposal.
     ## # A tibble: 24 x 2
     ##    publish_date delta
     ##    <date>       <dbl>
-    ##  1 2017-02-03   0.668
-    ##  2 2017-02-04   0.658
-    ##  3 2017-02-06   0.616
-    ##  4 2017-02-07   0.898
-    ##  5 2017-02-09   0.729
-    ##  6 2017-02-13   0.653
-    ##  7 2017-02-20   0.838
-    ##  8 2017-02-23   0.697
-    ##  9 2017-03-06   0.610
-    ## 10 2017-03-07   0.839
+    ##  1 2017-02-03   0.687
+    ##  2 2017-02-04   0.680
+    ##  3 2017-02-06   0.634
+    ##  4 2017-02-07   0.885
+    ##  5 2017-02-09   0.745
+    ##  6 2017-02-13   0.668
+    ##  7 2017-02-20   0.839
+    ##  8 2017-02-23   0.714
+    ##  9 2017-03-06   0.625
+    ## 10 2017-03-07   0.851
     ## # ... with 14 more rows
 
 If we map this to all writer's data, we get the following plot:
@@ -134,4 +137,88 @@ If we map this to all writer's data, we get the following plot:
 
 ![](ts_stylometry_files/figure-markdown_strict/unnamed-chunk-5-1.png)
 
-Help me.
+Alternate metric.
+-----------------
+
+Instead of using normalized frequencies, we can consider using the term
+frequency - inverse document frequency of each word in the document and
+then select the words with the highest tf-idf with some threshold. The
+threshold can be derived from...
+
+    nested_articles[1, ]$data[[1]] %>%
+      mutate(
+        text = str_replace_all(tolower(text), paste0(source, "|story highlights"), "")
+      ) %>%
+      select(-source) %>%
+      group_by(publish_date) %>%
+      unnest_tokens(word, text) %>%
+      count(word) %>%
+      ungroup() %>%
+      mutate(
+        publish_date = lubridate::ymd(publish_date)
+      ) %>%
+      bind_tf_idf(publish_date, word, n) %>%
+      group_by(publish_date) %>%
+      arrange(publish_date, tf_idf) %>%
+      filter(tf_idf >= quantile(tf_idf, 0.9)) %>%
+      ungroup() %>%
+      arrange(publish_date) %>%
+      pairwise_delta(publish_date, word, tf_idf, upper = F) %>%
+      filter(item1 == min(item1)) %>%
+      transmute(
+        publish_date = item2,
+        delta
+      ) %>%
+      ggplot(aes(publish_date, delta)) + 
+      geom_line()
+
+![](ts_stylometry_files/figure-markdown_strict/unnamed-chunk-6-1.png)
+
+Same author different sources.
+------------------------------
+
+    source_deltas <- news_articles %>%
+      distinct(text, source, .keep_all = T) %>%
+      mutate(length = map_int(authors, length)) %>%
+      filter(length < 2) %>%
+      unnest(authors) %>%
+      select(text, author = authors, publish_date, source) %>%
+      group_by(author) %>%
+      nest() %>%
+      mutate(
+        sources = map_int(data, function(x) {
+          x %>%
+            distinct(source) %>%
+            pull(source) %>%
+            length()
+        })
+      ) %>%
+      filter(sources > 1) %>%
+      mutate(
+        data = map(data, add_rowid),
+        deltas = map(data, function(x) {
+          x %>%
+            mutate(article_id = paste(source, article_id, sep = "_")) %>%
+            group_by(article_id) %>%
+            unnest_tokens(word, text) %>%
+            count(article_id, word) %>%
+            group_by(article_id) %>%
+            mutate(p_word = n/sum(n)) %>%
+            ungroup() %>%
+            pairwise_delta(article_id, word, p_word)
+        })
+      )
+
+    source_deltas %>%
+      select(author, deltas) %>%
+      unnest() %>%
+      filter(author == "mark sherman") %>%
+      select(-author) %>%
+      multi_scale(item1, item2, delta) %>%
+      # separate(item, into = c("source", "id"), sep = "_") %>%
+      ggplot(aes(V1, V2, color = item)) + 
+      geom_point() +
+      geom_text(aes(label = item)) +
+      scale_y_continuous(limits = c(-0.75, 0.75))
+
+![](ts_stylometry_files/figure-markdown_strict/unnamed-chunk-7-1.png)
